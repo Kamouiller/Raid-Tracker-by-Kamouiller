@@ -526,11 +526,20 @@ function sanitizeKey(str) {
 // le changement précis, ce qui empêche définitivement qu'une écriture sur
 // une zone efface ou corrompe les autres.
 function mutateZones(mutatorFn) {
-  zonesRef.transaction((currentData) => {
-    const merged = buildMergedZones(currentData);
-    mutatorFn(merged);
-    return merged;
-  });
+  zonesRef.once("value")
+    .then((snap) => {
+      const merged = buildMergedZones(snap.val());
+      mutatorFn(merged);
+      return zonesRef.set(merged);
+    })
+    .catch((err) => {
+      console.error("Erreur d'écriture Firebase:", err);
+      const el = document.getElementById("connStatus");
+      if (el) {
+        el.style.display = "block";
+        el.textContent = "⚠️ L'enregistrement a échoué (connexion instable ?). Réessaie.";
+      }
+    });
 }
 
 function toggleReaction(zi, si, emoji) {
