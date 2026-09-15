@@ -514,33 +514,54 @@ function fetchPokemonData(name) {
 
 const REACTION_EMOJIS = ["👍", "🔥", "😂", "😱"];
 function emojiKey(em) { return em; }
-function toggleReaction(zi, si, emoji) {
-  const key = sanitizeKey(pseudo);
-  const ref = zonesRef.child(`${zi}/slots/${si}/raid/reactions/${emojiKey(emoji)}/${key}`);
-  ref.once("value").then((snap) => {
-    if (snap.exists()) ref.remove();
-    else ref.set(true);
-  });
-}
 
 function sanitizeKey(str) {
   return (str || "anon").toString().replace(/[.#$\[\]\/]/g, "_").slice(0, 60) || "anon";
 }
 
 // ---------- Firebase read/write ----------
+// Toute mutation passe par une transaction atomique : Firebase relit la
+// donnée la plus fraîche, on la complète toujours via buildMergedZones
+// (structure garantie complète, aucune zone/lieu manquant) avant d'appliquer
+// le changement précis, ce qui empêche définitivement qu'une écriture sur
+// une zone efface ou corrompe les autres.
+function mutateZones(mutatorFn) {
+  zonesRef.transaction((currentData) => {
+    const merged = buildMergedZones(currentData);
+    mutatorFn(merged);
+    return merged;
+  });
+}
+
+function toggleReaction(zi, si, emoji) {
+  const key = sanitizeKey(pseudo);
+  mutateZones((current) => {
+    const raid = current[zi].slots[si].raid;
+    if (!raid) return;
+    if (!raid.reactions) raid.reactions = {};
+    if (!raid.reactions[emojiKey(emoji)]) raid.reactions[emojiKey(emoji)] = {};
+    if (raid.reactions[emojiKey(emoji)][key]) {
+      delete raid.reactions[emojiKey(emoji)][key];
+    } else {
+      raid.reactions[emojiKey(emoji)][key] = true;
+    }
+  });
+}
+
 function addRaid(zoneIdx, slotIdx, name, totalSeconds, sprite, types) {
   const endTime = Date.now() + totalSeconds * 1000;
   const raid = { name, totalSeconds, endTime, sprite: sprite || null, types: types || [], addedBy: pseudo || null };
-  zonesRef.child(`${zoneIdx}/slots/${slotIdx}/raid`).set(raid);
+  mutateZones((current) => {
+    current[zoneIdx].slots[slotIdx].raid = raid;
+  });
   logHistory(zoneIdx, slotIdx, name);
   openForm = null;
 }
 function editRaid(zoneIdx, slotIdx, name, totalSeconds, sprite, types) {
-  zonesRef.child(`${zoneIdx}/slots/${slotIdx}/raid`).once("value", (snap) => {
-    const existing = snap.val() || {};
+  mutateZones((current) => {
+    const existing = current[zoneIdx].slots[slotIdx].raid || {};
     const endTime = Date.now() + totalSeconds * 1000;
-    const raid = { ...existing, name, totalSeconds, endTime, sprite: sprite || null, types: types || existing.types || [] };
-    zonesRef.child(`${zoneIdx}/slots/${slotIdx}/raid`).set(raid);
+    current[zoneIdx].slots[slotIdx].raid = { ...existing, name, totalSeconds, endTime, sprite: sprite || null, types: types || existing.types || [] };
   });
   openForm = null;
 }
@@ -558,13 +579,17 @@ function logHistory(zoneIdx, slotIdx, name) {
 }
 function removeRaid(zoneIdx, slotIdx, slotId) {
   notifiedIds.delete(slotId);
-  zonesRef.child(`${zoneIdx}/slots/${slotIdx}/raid`).set(null);
+  mutateZones((current) => {
+    current[zoneIdx].slots[slotIdx].raid = null;
+  });
 }
 let renameZoneDebounce = null;
 function renameZone(zoneIdx, label) {
   clearTimeout(renameZoneDebounce);
   renameZoneDebounce = setTimeout(() => {
-    zonesRef.child(`${zoneIdx}/label`).set(label);
+    mutateZones((current) => {
+      current[zoneIdx].label = label;
+    });
   }, 400);
 }
 
