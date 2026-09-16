@@ -547,15 +547,15 @@ function applyLocally(mutatorFn) {
 }
 
 function writeSlot(zi, si, raidValue) {
-  const zc = ZONES_CONFIG[zi];
-  const zoneLabel = (zones[zi] && zones[zi].label) || zc.label;
-  zonesRef.update({
-    [`${zi}/id`]: `zone-${zi}`,
-    [`${zi}/label`]: zoneLabel,
-    [`${zi}/slots/${si}/id`]: `zone-${zi}-slot-${si}`,
-    [`${zi}/slots/${si}/locationName`]: zc.locations[si],
-    [`${zi}/slots/${si}/raid`]: raidValue,
-  }).catch(reportWriteError);
+  // On écrit la zone concernée EN ENTIER (label + tous ses emplacements),
+  // reconstruite depuis l'état local déjà à jour, mais toujours via un
+  // .set() scopé au SEUL index de cette zone (zonesRef.child(String(zi))).
+  // Ça garantit une structure toujours cohérente pour cette zone (utile
+  // la toute première fois qu'elle reçoit un raid), sans jamais toucher
+  // aux autres zones, quel que soit leur état.
+  const zoneObj = buildMergedZones(zones)[zi];
+  zoneObj.slots[si].raid = raidValue;
+  zonesRef.child(String(zi)).set(zoneObj).catch(reportWriteError);
 }
 
 function toggleReaction(zi, si, emoji) {
@@ -623,10 +623,9 @@ function renameZone(zoneIdx, label) {
   });
   clearTimeout(renameZoneDebounce);
   renameZoneDebounce = setTimeout(() => {
-    zonesRef.update({
-      [`${zoneIdx}/id`]: `zone-${zoneIdx}`,
-      [`${zoneIdx}/label`]: label,
-    }).catch(reportWriteError);
+    const zoneObj = buildMergedZones(zones)[zoneIdx];
+    zoneObj.label = label;
+    zonesRef.child(String(zoneIdx)).set(zoneObj).catch(reportWriteError);
   }, 400);
 }
 
