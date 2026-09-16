@@ -523,35 +523,45 @@ function sanitizeKey(str) {
 }
 
 // ---------- Firebase read/write ----------
-// Toute mutation passe par une transaction atomique : Firebase relit la
-// donnée la plus fraîche, on la complète toujours via buildMergedZones
-// (structure garantie complète, aucune zone/lieu manquant) avant d'appliquer
-// le changement précis, ce qui empêche définitivement qu'une écriture sur
-// une zone efface ou corrompe les autres.
-function mutateZones(mutatorFn) {
-  // On part de l'état local (déjà tenu à jour en direct par l'écouteur
-  // Firebase actif) plutôt que de relire la base juste avant d'écrire :
-  // ça supprime l'aller-retour réseau qui laissait une fenêtre pendant
-  // laquelle une donnée en retard pouvait revenir écraser l'ajout. On
-  // affiche aussi le résultat immédiatement (optimiste), sans attendre
-  // la confirmation réseau.
+// Chaque action écrit UNIQUEMENT les chemins précis concernés (via
+// update() multi-chemins), jamais le tableau entier des zones. Comme ça,
+// même si plusieurs personnes agissent en même temps sur des emplacements
+// différents, une écriture ne peut plus jamais effacer celle d'un autre.
+// L'affichage local, lui, reste optimiste (mis à jour immédiatement, sans
+// attendre la confirmation réseau).
+function reportWriteError(err) {
+  console.error("Erreur d'écriture Firebase:", err);
+  const el = document.getElementById("connStatus");
+  if (el) {
+    el.style.display = "block";
+    el.textContent = "⚠️ L'enregistrement a échoué (connexion instable ?). Réessaie.";
+  }
+}
+
+function applyLocally(mutatorFn) {
   const merged = buildMergedZones(zones);
   mutatorFn(merged);
   zones = merged;
   if (!openForm) renderAll();
-  zonesRef.set(merged).catch((err) => {
-    console.error("Erreur d'écriture Firebase:", err);
-    const el = document.getElementById("connStatus");
-    if (el) {
-      el.style.display = "block";
-      el.textContent = "⚠️ L'enregistrement a échoué (connexion instable ?). Réessaie.";
-    }
-  });
+  return merged;
+}
+
+function writeSlot(zi, si, raidValue) {
+  const zc = ZONES_CONFIG[zi];
+  const zoneLabel = (zones[zi] && zones[zi].label) || zc.label;
+  zonesRef.update({
+    [`${zi}/id`]: `zone-${zi}`,
+    [`${zi}/label`]: zoneLabel,
+    [`${zi}/slots/${si}/id`]: `zone-${zi}-slot-${si}`,
+    [`${zi}/slots/${si}/locationName`]: zc.locations[si],
+    [`${zi}/slots/${si}/raid`]: raidValue,
+  }).catch(reportWriteError);
 }
 
 function toggleReaction(zi, si, emoji) {
   const key = sanitizeKey(pseudo);
-  mutateZones((current) => {
+  let updatedRaid = null;
+  applyLocally((current) => {
     const raid = current[zi].slots[si].raid;
     if (!raid) return;
     if (!raid.reactions) raid.reactions = {};
@@ -561,25 +571,31 @@ function toggleReaction(zi, si, emoji) {
     } else {
       raid.reactions[emojiKey(emoji)][key] = true;
     }
+    updatedRaid = raid;
   });
+  if (updatedRaid) writeSlot(zi, si, updatedRaid);
 }
 
 function addRaid(zoneIdx, slotIdx, name, totalSeconds, sprite, types) {
   const endTime = Date.now() + totalSeconds * 1000;
   const raid = { name, totalSeconds, endTime, sprite: sprite || null, types: types || [], addedBy: pseudo || null };
   openForm = null;
-  mutateZones((current) => {
+  applyLocally((current) => {
     current[zoneIdx].slots[slotIdx].raid = raid;
   });
+  writeSlot(zoneIdx, slotIdx, raid);
   logHistory(zoneIdx, slotIdx, name);
 }
 function editRaid(zoneIdx, slotIdx, name, totalSeconds, sprite, types) {
   openForm = null;
-  mutateZones((current) => {
+  let updatedRaid = null;
+  applyLocally((current) => {
     const existing = current[zoneIdx].slots[slotIdx].raid || {};
     const endTime = Date.now() + totalSeconds * 1000;
-    current[zoneIdx].slots[slotIdx].raid = { ...existing, name, totalSeconds, endTime, sprite: sprite || null, types: types || existing.types || [] };
+    updatedRaid = { ...existing, name, totalSeconds, endTime, sprite: sprite || null, types: types || existing.types || [] };
+    current[zoneIdx].slots[slotIdx].raid = updatedRaid;
   });
+  writeSlot(zoneIdx, slotIdx, updatedRaid);
 }
 function logHistory(zoneIdx, slotIdx, name) {
   if (!historyRef) return;
@@ -595,17 +611,22 @@ function logHistory(zoneIdx, slotIdx, name) {
 }
 function removeRaid(zoneIdx, slotIdx, slotId) {
   notifiedIds.delete(slotId);
-  mutateZones((current) => {
+  applyLocally((current) => {
     current[zoneIdx].slots[slotIdx].raid = null;
   });
+  writeSlot(zoneIdx, slotIdx, null);
 }
 let renameZoneDebounce = null;
 function renameZone(zoneIdx, label) {
+  applyLocally((current) => {
+    current[zoneIdx].label = label;
+  });
   clearTimeout(renameZoneDebounce);
   renameZoneDebounce = setTimeout(() => {
-    mutateZones((current) => {
-      current[zoneIdx].label = label;
-    });
+    zonesRef.update({
+      [`${zoneIdx}/id`]: `zone-${zoneIdx}`,
+      [`${zoneIdx}/label`]: label,
+    }).catch(reportWriteError);
   }, 400);
 }
 
