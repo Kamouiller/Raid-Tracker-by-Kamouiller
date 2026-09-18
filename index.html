@@ -287,15 +287,29 @@ try {
 // nom), et en ajoutant simplement les nouveaux lieux/zones sans toucher au
 // reste. Ça évite de tout réinitialiser à chaque évolution de la config.
 function buildMergedZones(loaded) {
-  const loadedArr = Array.isArray(loaded) ? loaded : [];
+  // Firebase peut renvoyer "zones" soit comme un vrai tableau JS, soit comme
+  // un objet à clés numériques ("0", "1", "2"...) selon l'historique des
+  // écritures (ex: une écriture ciblée sur un nouvel index peut faire
+  // basculer la représentation). Ne tester QUE Array.isArray faisait croire
+  // à "aucune donnée" dans ce second cas, et effaçait tout. On gère les
+  // deux formats explicitement.
+  function getZoneAt(zi) {
+    if (Array.isArray(loaded)) return loaded[zi];
+    if (loaded && typeof loaded === "object") return loaded[String(zi)];
+    return undefined;
+  }
+  function getSlotsArray(zoneData) {
+    const s = zoneData && zoneData.slots;
+    if (Array.isArray(s)) return s;
+    if (s && typeof s === "object") return Object.keys(s).map((k) => s[k]);
+    return [];
+  }
   return ZONES_CONFIG.map((zc, zi) => {
-    const existingZone = loadedArr[zi];
+    const existingZone = getZoneAt(zi);
     const existingSlotsByLoc = {};
-    if (existingZone && Array.isArray(existingZone.slots)) {
-      existingZone.slots.forEach((sl) => {
-        if (sl && sl.locationName) existingSlotsByLoc[sl.locationName] = sl;
-      });
-    }
+    getSlotsArray(existingZone).forEach((sl) => {
+      if (sl && sl.locationName) existingSlotsByLoc[sl.locationName] = sl;
+    });
     return {
       id: `zone-${zi}`,
       label: (existingZone && existingZone.label) || zc.label,
