@@ -61,6 +61,7 @@
     color: #F5F1E8; font-size: 12px; padding: 8px 12px; cursor: pointer;
   }
   .tool-btn:hover { border-color: #E6473F; }
+  .tool-btn.admin-active { background: #2a1f0a; border-color: #F2A900; color: #F2A900; }
   .history-panel {
     background: #1E2128; border: 1px solid #2C303A; border-radius: 8px;
     padding: 12px; margin-bottom: 16px; max-height: 260px; overflow-y: auto;
@@ -176,6 +177,7 @@
       <div class="toolbar-row">
         <button id="copySummaryBtn" type="button" class="tool-btn">📋 Copier le résumé</button>
         <button id="historyBtn" type="button" class="tool-btn">📜 Historique</button>
+        <button id="adminBtn" type="button" class="tool-btn">🔑 Mode admin</button>
       </div>
 
       <div id="historyPanel" class="history-panel" style="display:none;">
@@ -220,6 +222,16 @@ let notifiedIds = new Set();
 let repeatTimer = null;
 let openForm = null;
 let pseudo = "";
+// Mode admin : simple protection locale par mot de passe, dans le même
+// esprit que la restriction d'édition (une politesse d'interface, pas une
+// vraie sécurité serveur — voir la discussion précédente). Change le mot
+// de passe ci-dessous avant de mettre en ligne.
+const ADMIN_PASSWORD = "Kamouiller25072000";
+const ADMIN_STORAGE_KEY = "cobblemon-raid-admin";
+let adminMode = localStorage.getItem(ADMIN_STORAGE_KEY) === "1";
+function isAdmin() {
+  return adminMode;
+}
 let db = null;
 let zonesRef = null;
 let presenceRef = null;
@@ -258,6 +270,7 @@ function enterApp() {
   initSoundPanel();
   initCopySummary();
   initHistoryPanel();
+  initAdminMode();
   setupPresence();
   updateNotifBtn();
   if (typeof Notification !== "undefined" && Notification.permission === "default") {
@@ -435,6 +448,37 @@ function initHistoryPanel() {
     if (willOpen) loadHistory();
   });
 }
+
+// ---------- Mode admin (protection locale, dans le même esprit que la
+// restriction d'édition : une politesse d'interface, pas une sécurité
+// serveur) ----------
+function updateAdminBtn() {
+  const btn = document.getElementById("adminBtn");
+  btn.textContent = adminMode ? "🔓 Quitter le mode admin" : "🔑 Mode admin";
+  btn.classList.toggle("admin-active", adminMode);
+}
+function initAdminMode() {
+  updateAdminBtn();
+  document.getElementById("adminBtn").addEventListener("click", () => {
+    if (adminMode) {
+      adminMode = false;
+      localStorage.removeItem(ADMIN_STORAGE_KEY);
+      updateAdminBtn();
+      renderAll();
+      return;
+    }
+    const attempt = window.prompt("Mot de passe admin :");
+    if (attempt === null) return;
+    if (attempt === ADMIN_PASSWORD) {
+      adminMode = true;
+      localStorage.setItem(ADMIN_STORAGE_KEY, "1");
+      updateAdminBtn();
+      renderAll();
+    } else {
+      window.alert("Mot de passe incorrect.");
+    }
+  });
+}
 function loadHistory() {
   if (!historyRef) return;
   const listEl = document.getElementById("historyList");
@@ -560,15 +604,19 @@ function applyLocally(mutatorFn) {
 }
 
 function writeSlot(zi, si, raidValue) {
-  // On écrit la zone concernée EN ENTIER (label + tous ses emplacements),
-  // reconstruite depuis l'état local déjà à jour, mais toujours via un
-  // .set() scopé au SEUL index de cette zone (zonesRef.child(String(zi))).
-  // Ça garantit une structure toujours cohérente pour cette zone (utile
-  // la toute première fois qu'elle reçoit un raid), sans jamais toucher
-  // aux autres zones, quel que soit leur état.
-  const zoneObj = buildMergedZones(zones)[zi];
-  zoneObj.slots[si].raid = raidValue;
-  zonesRef.child(String(zi)).set(zoneObj).catch(reportWriteError);
+  // Écriture ciblée SUR CE SEUL raid (pas toute la zone), pour que les
+  // règles de sécurité Firebase puissent vérifier l'auteur exact du raid
+  // modifié, sans jamais avoir besoin de valider (et donc risquer de
+  // bloquer) les raids des autres joueurs dans la même zone.
+  const zc = ZONES_CONFIG[zi];
+  const zoneLabel = (zones[zi] && zones[zi].label) || zc.label;
+  zonesRef.update({
+    [`${zi}/id`]: `zone-${zi}`,
+    [`${zi}/label`]: zoneLabel,
+    [`${zi}/slots/${si}/id`]: `zone-${zi}-slot-${si}`,
+    [`${zi}/slots/${si}/locationName`]: zc.locations[si],
+    [`${zi}/slots/${si}/raid`]: raidValue,
+  }).catch(reportWriteError);
 }
 
 function toggleReaction(zi, si, emoji) {
@@ -636,9 +684,10 @@ function renameZone(zoneIdx, label) {
   });
   clearTimeout(renameZoneDebounce);
   renameZoneDebounce = setTimeout(() => {
-    const zoneObj = buildMergedZones(zones)[zoneIdx];
-    zoneObj.label = label;
-    zonesRef.child(String(zoneIdx)).set(zoneObj).catch(reportWriteError);
+    zonesRef.update({
+      [`${zoneIdx}/id`]: `zone-${zoneIdx}`,
+      [`${zoneIdx}/label`]: label,
+    }).catch(reportWriteError);
   }, 400);
 }
 
@@ -891,8 +940,15 @@ function buildRaidFormEl({ initialName = "", initialH = "", initialM = "", initi
 }
 
 function canEdit(raid) {
+  if (isAdmin()) return true;
   if (!raid.addedBy) return true; // posté anonymement : modifiable par tous
   return raid.addedBy.trim().toLowerCase() === pseudo.trim().toLowerCase();
+}
+
+function canRemove(raid, done) {
+  if (isAdmin()) return true;
+  if (done) return true; // un raid terminé peut être fermé par tout le monde
+  return canEdit(raid);
 }
 
 function renderSlot(zone, zi, slot, si) {
@@ -954,6 +1010,7 @@ function renderSlot(zone, zi, slot, si) {
   const done = remaining <= 0;
   const urgent = !done && fraction < 0.1;
   const editable = canEdit(raid);
+  const removable = canRemove(raid, done);
 
   const wrap = document.createElement("div");
   wrap.className = "slot-wrap";
@@ -970,7 +1027,7 @@ function renderSlot(zone, zi, slot, si) {
       <div class="slot-icon">${raid.sprite ? `<img src="${raid.sprite}" alt="" />` : pokeballSvg(14)}</div>
       <span class="slot-name">${escapeHtml(raid.name)}</span>
       ${editable ? `<button class="edit-btn" title="Modifier">✎</button>` : ""}
-      <button class="remove-btn">×</button>
+      ${removable ? `<button class="remove-btn" title="Supprimer">×</button>` : ""}
     </div>
     ${typeBadges ? `<div class="type-row">${typeBadges}</div>` : ""}
     <div id="time-box-${slot.id}" class="time-box pixel ${done ? "done" : urgent ? "urgent" : ""}">${done ? "TERMINÉ" : formatRemaining(remaining)}</div>
@@ -991,7 +1048,9 @@ function renderSlot(zone, zi, slot, si) {
       document.querySelector(".slot-form .raid-name")?.focus();
     };
   }
-  el.querySelector(".remove-btn").onclick = () => removeRaid(zi, si, slot.id);
+  if (removable) {
+    el.querySelector(".remove-btn").onclick = () => removeRaid(zi, si, slot.id);
+  }
   el.querySelectorAll(".reaction-btn").forEach((btn) => {
     btn.onclick = () => toggleReaction(zi, si, btn.dataset.emoji);
   });
