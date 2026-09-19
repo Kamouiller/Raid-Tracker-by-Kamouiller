@@ -190,7 +190,6 @@
 <!-- Firebase (compat build, no bundler needed) -->
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-database-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-auth-compat.js"></script>
 <script>
 // ==========================================================================
 // 1) COLLE ICI la config de TON projet Firebase (Console Firebase > ⚙️
@@ -221,7 +220,6 @@ let notifiedIds = new Set();
 let repeatTimer = null;
 let openForm = null;
 let pseudo = "";
-let myUid = null; // identité anonyme vérifiée par Firebase (pas falsifiable côté client)
 let db = null;
 let zonesRef = null;
 let presenceRef = null;
@@ -248,33 +246,10 @@ function showGateError(msg) {
   el.textContent = msg;
 }
 
-function waitForUid(timeoutMs = 4000) {
-  return new Promise((resolve) => {
-    if (myUid) { resolve(myUid); return; }
-    const start = Date.now();
-    const iv = setInterval(() => {
-      if (myUid || Date.now() - start > timeoutMs) {
-        clearInterval(iv);
-        resolve(myUid);
-      }
-    }, 100);
-  });
-}
-
-async function enterApp() {
+function enterApp() {
   pseudo = document.getElementById("pseudoInput").value.trim();
   if (!firebaseReady) {
     showGateError("⚠️ Connexion à Firebase impossible — vérifie la config firebaseConfig tout en haut du <script> dans index.html (regarde la console du navigateur, touche F12, pour le détail de l'erreur).");
-    return;
-  }
-  const enterBtn = document.getElementById("enterBtn");
-  enterBtn.textContent = "Connexion…";
-  enterBtn.disabled = true;
-  const uid = await waitForUid();
-  enterBtn.disabled = false;
-  enterBtn.textContent = "Entrer";
-  if (!uid) {
-    showGateError("⚠️ Impossible de s'identifier auprès de Firebase (connexion anonyme). Vérifie ta connexion internet et réessaie.");
     return;
   }
   document.getElementById("gate").style.display = "none";
@@ -300,13 +275,6 @@ try {
   presenceRef = db.ref("presence");
   historyRef = db.ref("history");
   firebaseReady = true;
-  firebase.auth().onAuthStateChanged((user) => {
-    myUid = user ? user.uid : null;
-  });
-  firebase.auth().signInAnonymously().catch((err) => {
-    console.error("Connexion anonyme Firebase impossible :", err);
-    showGateError("⚠️ Impossible de s'identifier auprès de Firebase — vérifie que la connexion \"Anonyme\" est activée dans Firebase Console > Authentication > Sign-in method.");
-  });
 } catch (e) {
   console.error("Erreur d'initialisation Firebase :", e);
   showGateError("⚠️ Config Firebase invalide — vérifie firebaseConfig dans index.html.");
@@ -592,19 +560,15 @@ function applyLocally(mutatorFn) {
 }
 
 function writeSlot(zi, si, raidValue) {
-  // Écriture ciblée SUR CE SEUL raid (pas toute la zone), pour que les
-  // règles de sécurité Firebase puissent vérifier l'auteur exact du raid
-  // modifié, sans jamais avoir besoin de valider (et donc risquer de
-  // bloquer) les raids des autres joueurs dans la même zone.
-  const zc = ZONES_CONFIG[zi];
-  const zoneLabel = (zones[zi] && zones[zi].label) || zc.label;
-  zonesRef.update({
-    [`${zi}/id`]: `zone-${zi}`,
-    [`${zi}/label`]: zoneLabel,
-    [`${zi}/slots/${si}/id`]: `zone-${zi}-slot-${si}`,
-    [`${zi}/slots/${si}/locationName`]: zc.locations[si],
-    [`${zi}/slots/${si}/raid`]: raidValue,
-  }).catch(reportWriteError);
+  // On écrit la zone concernée EN ENTIER (label + tous ses emplacements),
+  // reconstruite depuis l'état local déjà à jour, mais toujours via un
+  // .set() scopé au SEUL index de cette zone (zonesRef.child(String(zi))).
+  // Ça garantit une structure toujours cohérente pour cette zone (utile
+  // la toute première fois qu'elle reçoit un raid), sans jamais toucher
+  // aux autres zones, quel que soit leur état.
+  const zoneObj = buildMergedZones(zones)[zi];
+  zoneObj.slots[si].raid = raidValue;
+  zonesRef.child(String(zi)).set(zoneObj).catch(reportWriteError);
 }
 
 function toggleReaction(zi, si, emoji) {
@@ -627,7 +591,7 @@ function toggleReaction(zi, si, emoji) {
 
 function addRaid(zoneIdx, slotIdx, name, totalSeconds, sprite, types) {
   const endTime = Date.now() + totalSeconds * 1000;
-  const raid = { name, totalSeconds, endTime, sprite: sprite || null, types: types || [], addedBy: pseudo || null, addedByUid: myUid || null };
+  const raid = { name, totalSeconds, endTime, sprite: sprite || null, types: types || [], addedBy: pseudo || null };
   openForm = null;
   applyLocally((current) => {
     current[zoneIdx].slots[slotIdx].raid = raid;
@@ -672,10 +636,9 @@ function renameZone(zoneIdx, label) {
   });
   clearTimeout(renameZoneDebounce);
   renameZoneDebounce = setTimeout(() => {
-    zonesRef.update({
-      [`${zoneIdx}/id`]: `zone-${zoneIdx}`,
-      [`${zoneIdx}/label`]: label,
-    }).catch(reportWriteError);
+    const zoneObj = buildMergedZones(zones)[zoneIdx];
+    zoneObj.label = label;
+    zonesRef.child(String(zoneIdx)).set(zoneObj).catch(reportWriteError);
   }, 400);
 }
 
@@ -928,14 +891,8 @@ function buildRaidFormEl({ initialName = "", initialH = "", initialM = "", initi
 }
 
 function canEdit(raid) {
-  if (raid.addedByUid) return raid.addedByUid === myUid;
-  if (!raid.addedBy) return true; // posté anonymement (ancien raid sans UID) : modifiable par tous
+  if (!raid.addedBy) return true; // posté anonymement : modifiable par tous
   return raid.addedBy.trim().toLowerCase() === pseudo.trim().toLowerCase();
-}
-
-function canRemove(raid, done) {
-  if (done) return true; // un raid terminé peut être fermé par tout le monde
-  return canEdit(raid);
 }
 
 function renderSlot(zone, zi, slot, si) {
@@ -997,7 +954,6 @@ function renderSlot(zone, zi, slot, si) {
   const done = remaining <= 0;
   const urgent = !done && fraction < 0.1;
   const editable = canEdit(raid);
-  const removable = canRemove(raid, done);
 
   const wrap = document.createElement("div");
   wrap.className = "slot-wrap";
@@ -1014,7 +970,7 @@ function renderSlot(zone, zi, slot, si) {
       <div class="slot-icon">${raid.sprite ? `<img src="${raid.sprite}" alt="" />` : pokeballSvg(14)}</div>
       <span class="slot-name">${escapeHtml(raid.name)}</span>
       ${editable ? `<button class="edit-btn" title="Modifier">✎</button>` : ""}
-      ${removable ? `<button class="remove-btn" title="Supprimer">×</button>` : ""}
+      <button class="remove-btn">×</button>
     </div>
     ${typeBadges ? `<div class="type-row">${typeBadges}</div>` : ""}
     <div id="time-box-${slot.id}" class="time-box pixel ${done ? "done" : urgent ? "urgent" : ""}">${done ? "TERMINÉ" : formatRemaining(remaining)}</div>
@@ -1035,9 +991,7 @@ function renderSlot(zone, zi, slot, si) {
       document.querySelector(".slot-form .raid-name")?.focus();
     };
   }
-  if (removable) {
-    el.querySelector(".remove-btn").onclick = () => removeRaid(zi, si, slot.id);
-  }
+  el.querySelector(".remove-btn").onclick = () => removeRaid(zi, si, slot.id);
   el.querySelectorAll(".reaction-btn").forEach((btn) => {
     btn.onclick = () => toggleReaction(zi, si, btn.dataset.emoji);
   });
