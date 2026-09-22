@@ -299,41 +299,39 @@ try {
 // raids déjà en cours pour les lieux qui existaient déjà (retrouvés par leur
 // nom), et en ajoutant simplement les nouveaux lieux/zones sans toucher au
 // reste. Ça évite de tout réinitialiser à chaque évolution de la config.
-function buildMergedZones(loaded) {
-  // Firebase peut renvoyer "zones" soit comme un vrai tableau JS, soit comme
-  // un objet à clés numériques ("0", "1", "2"...) selon l'historique des
-  // écritures (ex: une écriture ciblée sur un nouvel index peut faire
-  // basculer la représentation). Ne tester QUE Array.isArray faisait croire
-  // à "aucune donnée" dans ce second cas, et effaçait tout. On gère les
-  // deux formats explicitement.
-  function getZoneAt(zi) {
-    if (Array.isArray(loaded)) return loaded[zi];
-    if (loaded && typeof loaded === "object") return loaded[String(zi)];
-    return undefined;
-  }
-  function getSlotsArray(zoneData) {
-    const s = zoneData && zoneData.slots;
-    if (Array.isArray(s)) return s;
-    if (s && typeof s === "object") return Object.keys(s).map((k) => s[k]);
-    return [];
-  }
+function buildMergedZones(firebaseZones) {
+  // Fusion robuste : la configuration locale définit les zones/slots,
+  // Firebase fournit uniquement les données enregistrées (dont les raids).
+  // Une zone ou un slot absent de Firebase n'efface jamais les autres données.
+  const source = (firebaseZones && typeof firebaseZones === "object")
+    ? firebaseZones
+    : {};
+
   return ZONES_CONFIG.map((zc, zi) => {
-    const existingZone = getZoneAt(zi);
-    const existingSlotsByLoc = {};
-    getSlotsArray(existingZone).forEach((sl) => {
-      if (sl && sl.locationName) existingSlotsByLoc[sl.locationName] = sl;
-    });
+    const remoteZone = (source[zi] && typeof source[zi] === "object")
+      ? source[zi]
+      : {};
+
+    const remoteSlots = (remoteZone.slots && typeof remoteZone.slots === "object")
+      ? remoteZone.slots
+      : {};
+
     return {
-      id: `zone-${zi}`,
-      label: (existingZone && existingZone.label) || zc.label,
-      slots: zc.locations.map((loc, si) => {
-        const existingSlot = existingSlotsByLoc[loc];
+      id: remoteZone.id || `zone-${zi}`,
+      label: remoteZone.label || zc.label,
+      slots: zc.locations.map((locationName, si) => {
+        const remoteSlot = (remoteSlots[si] && typeof remoteSlots[si] === "object")
+          ? remoteSlots[si]
+          : {};
+
         return {
-          id: `zone-${zi}-slot-${si}`,
-          locationName: loc,
-          raid: (existingSlot && existingSlot.raid) || null,
+          id: remoteSlot.id || `zone-${zi}-slot-${si}`,
+          locationName: remoteSlot.locationName || locationName,
+          raid: Object.prototype.hasOwnProperty.call(remoteSlot, "raid")
+            ? remoteSlot.raid
+            : null
         };
-      }),
+      })
     };
   });
 }
@@ -694,37 +692,7 @@ function renameZone(zoneIdx, label) {
 
 // ---------- Firebase realtime listeners (only if init succeeded) ----------
 if (firebaseReady) {
-  // --- Initialisation robuste des zones Firebase ---
-async function ensureFirebaseZones() {
-  try {
-    const snapshot = await zonesRef.once("value");
-    const current = snapshot.val() || {};
-    const updates = {};
-
-    ZONES_CONFIG.forEach((zc, zi) => {
-      const existingZone = current[zi] || {};
-      if (!existingZone.id) updates[`${zi}/id`] = `zone-${zi}`;
-      if (!existingZone.label) updates[`${zi}/label`] = zc.label;
-
-      zc.locations.forEach((locationName, si) => {
-        const existingSlot = existingZone.slots && existingZone.slots[si];
-        if (!existingSlot || !existingSlot.id)
-          updates[`${zi}/slots/${si}/id`] = `zone-${zi}-slot-${si}`;
-        if (!existingSlot || !existingSlot.locationName)
-          updates[`${zi}/slots/${si}/locationName`] = locationName;
-      });
-    });
-
-    if (Object.keys(updates).length > 0) {
-      await zonesRef.update(updates);
-      console.log("[Firebase] Zones manquantes initialisées", updates);
-    }
-  } catch (error) {
-    console.error("[Firebase] Impossible d'initialiser les zones", error);
-  }
-}
-
-zonesRef.on("value", (snapshot) => {
+  zonesRef.on("value", (snapshot) => {
     const val = snapshot.val();
     // La fusion avec ZONES_CONFIG reste purement locale à l'affichage :
     // chaque client la recalcule à partir des mêmes données brutes, sans
@@ -739,11 +707,7 @@ zonesRef.on("value", (snapshot) => {
       renderAll();
     }
     updateConnStatus(true);
-
-  if (!window.__firebaseZonesInitialized) {
-    window.__firebaseZonesInitialized = true;
-    ensureFirebaseZones();
-  }  }, (err) => {
+  }, (err) => {
     updateConnStatus(false, err);
   });
 }
