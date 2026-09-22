@@ -694,7 +694,37 @@ function renameZone(zoneIdx, label) {
 
 // ---------- Firebase realtime listeners (only if init succeeded) ----------
 if (firebaseReady) {
-  zonesRef.on("value", (snapshot) => {
+  // --- Initialisation robuste des zones Firebase ---
+async function ensureFirebaseZones() {
+  try {
+    const snapshot = await zonesRef.once("value");
+    const current = snapshot.val() || {};
+    const updates = {};
+
+    ZONES_CONFIG.forEach((zc, zi) => {
+      const existingZone = current[zi] || {};
+      if (!existingZone.id) updates[`${zi}/id`] = `zone-${zi}`;
+      if (!existingZone.label) updates[`${zi}/label`] = zc.label;
+
+      zc.locations.forEach((locationName, si) => {
+        const existingSlot = existingZone.slots && existingZone.slots[si];
+        if (!existingSlot || !existingSlot.id)
+          updates[`${zi}/slots/${si}/id`] = `zone-${zi}-slot-${si}`;
+        if (!existingSlot || !existingSlot.locationName)
+          updates[`${zi}/slots/${si}/locationName`] = locationName;
+      });
+    });
+
+    if (Object.keys(updates).length > 0) {
+      await zonesRef.update(updates);
+      console.log("[Firebase] Zones manquantes initialisées", updates);
+    }
+  } catch (error) {
+    console.error("[Firebase] Impossible d'initialiser les zones", error);
+  }
+}
+
+zonesRef.on("value", (snapshot) => {
     const val = snapshot.val();
     // La fusion avec ZONES_CONFIG reste purement locale à l'affichage :
     // chaque client la recalcule à partir des mêmes données brutes, sans
@@ -709,7 +739,11 @@ if (firebaseReady) {
       renderAll();
     }
     updateConnStatus(true);
-  }, (err) => {
+
+  if (!window.__firebaseZonesInitialized) {
+    window.__firebaseZonesInitialized = true;
+    ensureFirebaseZones();
+  }  }, (err) => {
     updateConnStatus(false, err);
   });
 }
