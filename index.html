@@ -141,8 +141,9 @@
         <h1 class="pixel">RAID TRACKER</h1>
       </div>
       <p class="sub" style="margin-bottom:16px;">Veuillez indiquer votre Prénom sur votre carte d'identité</p>
-      <input id="pseudoInput" type="text" placeholder="Ton pseudo" autofocus />
-      <button id="enterBtn">Entrer</button>
+      <input id="pseudoInput" type="text" placeholder="Prénom du personnage (ex: Elara Duval)" autofocus />
+      <p class="sub2" id="pseudoMemoNote" style="display:none; margin: 8px 0 0;">Mémorisé sur cet appareil — modifie le champ si besoin.</p>
+      <button id="enterBtn" style="margin-top:10px;">Entrer</button>
     </div>
   </div>
 
@@ -198,13 +199,13 @@
 //    Paramètres du projet > tes applications > SDK setup and configuration)
 // ==========================================================================
 const firebaseConfig = {
-  apiKey: "AIzaSyBKb105pbrFy0b4a4dYFuBpabipvnKAl2I",
-  authDomain: "tracker-de-raid.firebaseapp.com",
-  databaseURL: "https://tracker-de-raid-default-rtdb.europe-west1.firebasedatabase.app",
-  projectId: "tracker-de-raid",
-  storageBucket: "tracker-de-raid.firebasestorage.app",
-  messagingSenderId: "434553611825",
-  appId: "1:434553611825:web:a7f184659c9457ef949710"
+  apiKey: "AIzaSyBzL5qt0RduWbyluSE-luWMygTHHbeHA38",
+  authDomain: "raid-tracker-4f7dc.firebaseapp.com",
+  databaseURL: "https://raid-tracker-4f7dc-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "raid-tracker-4f7dc",
+  storageBucket: "raid-tracker-4f7dc.firebasestorage.app",
+  messagingSenderId: "663219222496",
+  appId: "1:663219222496:web:8b0ce0976de396c6a25d85"
 };
 // ==========================================================================
 
@@ -229,6 +230,7 @@ let pseudo = "";
 // de passe ci-dessous avant de mettre en ligne.
 const ADMIN_PASSWORD = "Kamouiller25072000";
 const ADMIN_STORAGE_KEY = "cobblemon-raid-admin";
+const PSEUDO_STORAGE_KEY = "cobblemon-raid-pseudo";
 let adminMode = localStorage.getItem(ADMIN_STORAGE_KEY) === "1";
 function isAdmin() {
   return adminMode;
@@ -245,6 +247,15 @@ const sessionId = "s-" + Date.now().toString(36) + "-" + Math.random().toString(
 // is wrong or the network is unavailable. ----------
 document.getElementById("enterBtn").addEventListener("click", enterApp);
 document.getElementById("pseudoInput").addEventListener("keydown", (e) => { if (e.key === "Enter") enterApp(); });
+(function prefillPseudo() {
+  const saved = localStorage.getItem(PSEUDO_STORAGE_KEY);
+  if (saved) {
+    const input = document.getElementById("pseudoInput");
+    input.value = saved;
+    document.getElementById("pseudoMemoNote").style.display = "block";
+    input.select();
+  }
+})();
 
 function showGateError(msg) {
   let el = document.getElementById("gateError");
@@ -261,6 +272,7 @@ function showGateError(msg) {
 
 function enterApp() {
   pseudo = document.getElementById("pseudoInput").value.trim();
+  if (pseudo) localStorage.setItem(PSEUDO_STORAGE_KEY, pseudo);
   if (!firebaseReady) {
     showGateError("⚠️ Connexion à Firebase impossible — vérifie la config firebaseConfig tout en haut du <script> dans index.html (regarde la console du navigateur, touche F12, pour le détail de l'erreur).");
     return;
@@ -299,39 +311,41 @@ try {
 // raids déjà en cours pour les lieux qui existaient déjà (retrouvés par leur
 // nom), et en ajoutant simplement les nouveaux lieux/zones sans toucher au
 // reste. Ça évite de tout réinitialiser à chaque évolution de la config.
-function buildMergedZones(firebaseZones) {
-  // Fusion robuste : la configuration locale définit les zones/slots,
-  // Firebase fournit uniquement les données enregistrées (dont les raids).
-  // Une zone ou un slot absent de Firebase n'efface jamais les autres données.
-  const source = (firebaseZones && typeof firebaseZones === "object")
-    ? firebaseZones
-    : {};
-
+function buildMergedZones(loaded) {
+  // Firebase peut renvoyer "zones" soit comme un vrai tableau JS, soit comme
+  // un objet à clés numériques ("0", "1", "2"...) selon l'historique des
+  // écritures (ex: une écriture ciblée sur un nouvel index peut faire
+  // basculer la représentation). Ne tester QUE Array.isArray faisait croire
+  // à "aucune donnée" dans ce second cas, et effaçait tout. On gère les
+  // deux formats explicitement.
+  function getZoneAt(zi) {
+    if (Array.isArray(loaded)) return loaded[zi];
+    if (loaded && typeof loaded === "object") return loaded[String(zi)];
+    return undefined;
+  }
+  function getSlotsArray(zoneData) {
+    const s = zoneData && zoneData.slots;
+    if (Array.isArray(s)) return s;
+    if (s && typeof s === "object") return Object.keys(s).map((k) => s[k]);
+    return [];
+  }
   return ZONES_CONFIG.map((zc, zi) => {
-    const remoteZone = (source[zi] && typeof source[zi] === "object")
-      ? source[zi]
-      : {};
-
-    const remoteSlots = (remoteZone.slots && typeof remoteZone.slots === "object")
-      ? remoteZone.slots
-      : {};
-
+    const existingZone = getZoneAt(zi);
+    const existingSlotsByLoc = {};
+    getSlotsArray(existingZone).forEach((sl) => {
+      if (sl && sl.locationName) existingSlotsByLoc[sl.locationName] = sl;
+    });
     return {
-      id: remoteZone.id || `zone-${zi}`,
-      label: remoteZone.label || zc.label,
-      slots: zc.locations.map((locationName, si) => {
-        const remoteSlot = (remoteSlots[si] && typeof remoteSlots[si] === "object")
-          ? remoteSlots[si]
-          : {};
-
+      id: `zone-${zi}`,
+      label: (existingZone && existingZone.label) || zc.label,
+      slots: zc.locations.map((loc, si) => {
+        const existingSlot = existingSlotsByLoc[loc];
         return {
-          id: remoteSlot.id || `zone-${zi}-slot-${si}`,
-          locationName: remoteSlot.locationName || locationName,
-          raid: Object.prototype.hasOwnProperty.call(remoteSlot, "raid")
-            ? remoteSlot.raid
-            : null
+          id: `zone-${zi}-slot-${si}`,
+          locationName: loc,
+          raid: (existingSlot && existingSlot.raid) || null,
         };
-      })
+      }),
     };
   });
 }
